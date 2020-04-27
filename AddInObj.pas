@@ -37,7 +37,7 @@ uses  { Какие библиотеки используем }
     );
 
     //Количество методов
-     const c_MethCount = 14;
+     const c_MethCount = 15;
     //Идентификаторы методов.
     type TMethods = (
        methRequest,
@@ -53,7 +53,8 @@ uses  { Какие библиотеки используем }
        methSetParentRoot, // получить элемент массива, сохраненного под именем ранее, параметры - имя массива, строка, колонка
        methGetPairsCount,
        methGetPairName,
-       methGetPairValue
+       methGetPairValue,
+       methParseFile
 
        );
 
@@ -74,7 +75,8 @@ uses  { Какие библиотеки используем }
     ('SetParentRoot','JSONУстановитьПредыдущийКорень','УстановитьПредыдущийКорень','0'),
     ('GetPairsCount','JSONКоличествоПар','КоличествоПар','0'),
     ('GetPairName','JSONИмяПары','ИмяПары','1'), // индекс пары
-    ('GetPairValue','JSONЗначениеПары','ЗначениеПары','1') //индекс пары
+    ('GetPairValue','JSONЗначениеПары','ЗначениеПары','1'), //индекс пары
+    ('ParseFile','РазобратьФайл','РазобратьФайл','1') //разобрать файл с json
     );
 
 const
@@ -95,6 +97,7 @@ type
     JSON, RJSON:TJSONValue;
     stack:TArray<TJSONValue>;
     function SendRESTRequest:TJSONObject;
+    function ParseFile(Filename:String):byte;
   public
     i1cv7: IDispatch;
     iStatus: IStatusLine;
@@ -162,6 +165,33 @@ begin
 end;
 
 ///////////////////////////////////////////////////////////////////////
+function AddInObject.ParseFile(Filename: String): byte;
+Var FileStream:TFileStream;
+    MemStream:TMemoryStream;
+    S:String;
+begin
+  Result:=0;
+  FileStream:=TFileStream.Create(Filename,fmOpenRead);
+  MemStream:=TMemoryStream.Create;
+  try
+    MemStream.CopyFrom(FileStream,FileStream.Size);
+    //ConvertStreamFromAnsiToUTF8(FileStream,MemStream); // конвертируем из файла ansi в utf-8
+    MemStream.Seek(0,soFromEnd);
+    MemStream.Write(#0#0,2);
+    MemStream.Seek(0,soFromBeginning);
+    FreeAndNil(JSON);
+    S:=PAnsiChar(MemStream.Memory);
+    JSON:=TJSONObject.ParseJSONValue(S);
+    RJSON:=JSON;
+    SetLength(stack,1);
+    stack[0]:=JSON;
+    if(JSON<> nil) then Result:=1;
+  finally
+    FreeAndNil(MemStream);
+    FreeAndNil(FileStream);
+  end;
+end;
+
 procedure AddInObject.PutNParam(var pArray: PSafeArray; lIndex: Integer; var varPut: OleVariant);
 begin
   SafeArrayPutElement(pArray,lIndex,varPut);
@@ -323,15 +353,15 @@ begin
 end;
 ///////////////////////////////////////////////////////////////////////
 function AddInObject.SendRESTRequest:TJSONObject;
-var F:TFileStream;
-    M:TMemoryStream;
+var FileStream:TFileStream;
+    MemStream:TMemoryStream;
     R:IHTTPResponse;
-    S:String;
-    H:TNetHeaders;
+    ResponseFilename:String;
+    headers:TNetHeaders;
 begin
   Result:=nil;
-  S:=objFileResponse;
-  if S='' then S:=objFileName+'.response.json';
+  ResponseFilename:=objFileResponse;
+  if ResponseFilename='' then ResponseFilename:=objFileName+'.response.json';
   NetHTTPClient.AcceptCharSet:='UTF-8, *;q=0.8';
   NetHTTPClient.AllowCookies:=true;
   NetHTTPClient.Asynchronous:=false;
@@ -339,32 +369,29 @@ begin
   NetHTTPClient.HandleRedirects:=True;
   NetHTTPClient.UserAgent:='vk_rest component';
   NetHTTPRequest.Client:=NetHTTPClient;
-  FreeAndNil(JSON);
+  FreeAndNil(JSON); // обнуляем результат предыдущего запроса, чтобы не было утечек памяти при частом использовании
   try
+    MemStream:=TMemoryStream.Create; // стрим в памяти
+    FileStream:=TFileStream.Create(objFileName,fmOpenReadWrite); // открываем файл
+    SetLength(headers, 1); // задаем заголовки
+    headers[Length(headers)-1].Name:='Content-type';
+    headers[Length(headers)-1].Value:='application/json; charset=utf-8';
     try
-      M:=TMemoryStream.Create;
-      F:=TFileStream.Create(objFileName,fmOpenReadWrite);
-      SetLength(H, 1);
-      H[Length(H)-1].Name:='Content-type';
-      H[Length(H)-1].Value:='application/json; charset=utf-8';
+      ConvertStreamFromAnsiToUTF8(FileStream,MemStream); // конвертируем из файла ansi в utf-8
+      R:=NetHTTPRequest.Post(objURL,MemStream,nil,headers); // делаем запрос
+      MemStream.Clear; // чистим стрим в памяти
+      ConvertStreamFromUTF8ToAnsi(R.ContentStream,MemStream); // перегоняем обратно из utf8 в ansi
+      FreeAndNil(FileStream); // закрываем файл,
       try
-        ConvertStreamFromAnsiToUTF8(F,M);
-        R:=NetHTTPRequest.Post(objURL,M,nil,H);
-        M.Clear;
-
-        ConvertStreamFromUTF8ToAnsi(R.ContentStream,M);
-        FreeAndNil(F);
-        F:=TFileStream.Create(S,fmCreate or fmOpenWrite or fmShareCompat);
-        F.CopyFrom(M,M.Size);
-
+        // parsing response
         JSON:=TJSONObject.ParseJSONValue(R.ContentAsString);
-        RJSON:=JSON;
-        SetLength(stack,1);
+        RJSON:=JSON;                // copy to currentroot
+        SetLength(stack,1);   // обнуляем стек и помещаем в вершину корневой JSON
         stack[0]:=JSON;
-      except
-        on E:Exception do begin
-          ShowErrorLog(E.Message);
-        end;
+      finally
+      // в любом случае записываем ответ в файл
+        FileStream:=TFileStream.Create(ResponseFilename,fmCreate or fmOpenWrite or fmShareCompat);
+        FileStream.CopyFrom(MemStream,MemStream.Size);
       end;
     except
       on E:Exception do begin
@@ -372,8 +399,8 @@ begin
       end;
     end;
   finally
-    FreeAndNil(F);
-    FreeAndNil(M);
+    FreeAndNil(FileStream);
+    FreeAndNil(MemStream);
   end;
   //Result:=TJSONObject(JSON);
 
@@ -565,8 +592,12 @@ begin
         if Assigned(JSON) then pvarRetValue:=1;
       end;
       methJSONGetValueType: begin
-          pvarRetValue:='';
-          a:=GetNParam(paParams,0);
+        pvarRetValue:='';
+        a:=GetNParam(paParams,0);
+        if(a='') then begin
+          s:=TJSONObject(RJSON).ClassName;
+          pvarRetValue:=s;
+        end else begin
           if TJSONObject(RJSON).Values[a]<>nil then begin
               s:=TJSONObject(RJSON).GetValue(a).ClassName;
               //if s='TJSONArray' then pvarRetValue:='Массив';
@@ -576,8 +607,10 @@ begin
               //if s='TJSONFalse' then pvarRetValue:='Число';
               pvarRetValue:=s;
           end;
+        end;
       end;
-      methJSONGetValue: begin
+      methJSONGetValue:
+        begin
           a:=GetNParam(paParams,0);
           if TJSONObject(RJSON).Values[a]=nil then raise Exception.Create('Неверное имя '+a);
           s:=TJSONObject(RJSON).Values[a].ClassName;
@@ -585,49 +618,73 @@ begin
           pvarRetValue:=TJSONObject(RJSON).Values[a].Value;
           if s='TJSONTrue' then pvarRetValue:=1;
           if s='TJSONFalse' then pvarRetValue:=0;
-
-      end;
-      methJSONArrayCount:begin  // получить размер массива
+        end;
+      methJSONArrayCount:
+        begin  // получить размер массива
           a:=GetNParam(paParams,0);
-          if TJSONObject(RJSON).Values[a]=nil then raise Exception.Create('Неверное имя '+a);
-          s:=TJSONObject(RJSON).Values[a].ClassName;
-          if s='TJSONArray' then begin
-            pvarRetValue:=TJSONArray(TJSONObject(RJSON).Values[a]).Count;
-          end else  raise Exception.Create('Узел '+a+' не является массивом');
-      end;
-      methJSONGetArrayValueType:begin
+          if(a='') then begin
+            s:=TJSONObject(RJSON).ClassName;
+            if s='TJSONArray' then begin
+              pvarRetValue:=TJSONArray(RJSON).Count;
+            end else  raise Exception.Create('Текущий корневой узел '+a+' не является массивом');
+          end else begin
+            if TJSONObject(RJSON).Values[a]=nil then raise Exception.Create('Неверное имя '+a);
+            s:=TJSONObject(RJSON).Values[a].ClassName;
+            if s='TJSONArray' then begin
+              pvarRetValue:=TJSONArray(TJSONObject(RJSON).Values[a]).Count;
+            end else  raise Exception.Create('Узел '+a+' не является массивом');
+          end;
+        end;
+      methJSONGetArrayValueType:
+        begin
           a:=GetNParam(paParams,0);
           x:=GetNParam(paParams,1);
+          if(a='') then begin
+            s:=TJSONObject(RJSON).ClassName;
+            if s='TJSONArray' then begin
+              J:=TJSONArray(RJSON).Items[x];
+              s:=TJSONObject(J).ClassName;
+              pvarRetValue:=s;
+            end else  raise Exception.Create('Текущий корневой узел '+a+' не является массивом');
+          end else begin
+            if TJSONObject(RJSON).Values[a]=nil then raise Exception.Create('Неверное имя '+a);
+            s:=TJSONObject(RJSON).Values[a].ClassName;
+            if s='TJSONArray' then begin
+              J:=TJSONArray(TJSONObject(RJSON).Values[a]).Items[x];
+              s:=TJSONObject(J).ClassName;
+              pvarRetValue:=s;
+            end else  raise Exception.Create('Узел '+a+' не является массивом');
+          end;
 
-          if TJSONObject(RJSON).Values[a]=nil then raise Exception.Create('Неверное имя '+a);
-          s:=TJSONObject(RJSON).Values[a].ClassName;
-          if s='TJSONArray' then begin
-            J:=TJSONArray(TJSONObject(RJSON).Values[a]).Items[x];
-            s:=TJSONObject(J).ClassName;
-            pvarRetValue:=s;
-          end else  raise Exception.Create('Узел '+a+' не является массивом');
-
-      end;
-      methJSONGetArrayValue:begin // получить элемент массива, параметры - имя, строка, имя
+        end;
+      methJSONGetArrayValue:
+        begin // получить элемент массива, параметры - имя, строка, имя
           a:=GetNParam(paParams,0);
           x:=GetNParam(paParams,1);
           fname:=GetNParam(paParams,2);
+          if(a='') then begin
+            s:=TJSONObject(RJSON).ClassName;
+            if s='TJSONArray' then begin
+              J:=TJSONArray(RJSON).Items[x];
+            end else  raise Exception.Create('Текущий корневой узел '+a+' не является массивом');
 
-          if TJSONObject(RJSON).Values[a]=nil then raise Exception.Create('Неверное имя '+a);
-          s:=TJSONObject(RJSON).Values[a].ClassName;
-          if s='TJSONArray' then begin
-            J:=TJSONArray(TJSONObject(RJSON).Values[a]).Items[x];
+          end else begin
+            if TJSONObject(RJSON).Values[a]=nil then raise Exception.Create('Неверное имя '+a);
+            s:=TJSONObject(RJSON).Values[a].ClassName;
+            if s='TJSONArray' then begin
+              J:=TJSONArray(TJSONObject(RJSON).Values[a]).Items[x];
+            end else  raise Exception.Create('Узел '+a+' не является массивом');
+          end;
+          if(fname='') then s:=TJSONObject(J).ClassName
+            else s:=TJSONObject(J).Values[fname].ClassName;
+          if s='TJSONArray' then raise Exception.Create('Узел '+fname+' является массивом');
+          if s='TJSONObject' then raise Exception.Create('Узел '+fname+' является объектом');
+          if(fname='') then pvarRetValue := J.Value
+            else pvarRetValue:=TJSONObject(J).Values[fname].Value;
+          if s='TJSONTrue' then pvarRetValue:=1;
+          if s='TJSONFalse' then pvarRetValue:=0;
 
-            if(fname='') then s:=TJSONObject(J).ClassName
-              else s:=TJSONObject(J).Values[fname].ClassName;
-            if s='TJSONArray' then raise Exception.Create('Узел '+fname+' является массивом');
-            if s='TJSONObject' then raise Exception.Create('Узел '+fname+' является объектом');
-            if(fname='') then pvarRetValue := J.Value
-              else pvarRetValue:=TJSONObject(J).Values[fname].Value;
-            if s='TJSONTrue' then pvarRetValue:=1;
-            if s='TJSONFalse' then pvarRetValue:=0;
-          end else  raise Exception.Create('Узел '+a+' не является массивом');
-      end;
+        end;
       methSetRoot:  // установить новый корень
         begin
           a:=GetNParam(paParams,0);
@@ -640,14 +697,24 @@ begin
         begin
           a:=GetNParam(paParams,0);
           x:=GetNParam(paParams,1);
-          if TJSONObject(RJSON).Values[a]=nil then raise Exception.Create('Неверное имя '+a);
-          s:=TJSONObject(RJSON).Values[a].ClassName;
-          if s='TJSONArray' then begin
-            J:=TJSONArray(TJSONObject(RJSON).Values[a]).Items[x];
-            SetLength(stack,Length(stack)+1);
-            stack[Length(stack)-1]:=RJSON;
-            RJSON:=J;
-          end else  raise Exception.Create('Узел '+a+' не является массивом');
+          if(a='') then begin
+            s:=TJSONObject(RJSON).ClassName;
+            if s='TJSONArray' then begin
+              J:=TJSONArray(RJSON).Items[x];
+              SetLength(stack,Length(stack)+1);
+              stack[Length(stack)-1]:=RJSON;
+              RJSON:=J;
+            end else  raise Exception.Create('Текущий корневой узел '+a+' не является массивом');
+          end else begin
+            if TJSONObject(RJSON).Values[a]=nil then raise Exception.Create('Неверное имя '+a);
+            s:=TJSONObject(RJSON).Values[a].ClassName;
+            if s='TJSONArray' then begin
+              J:=TJSONArray(TJSONObject(RJSON).Values[a]).Items[x];
+              SetLength(stack,Length(stack)+1);
+              stack[Length(stack)-1]:=RJSON;
+              RJSON:=J;
+            end else  raise Exception.Create('Узел '+a+' не является массивом');
+          end;
         end;
       methClearRoot:  // сбросить корень
         begin
@@ -661,18 +728,22 @@ begin
           SetLength(stack,Length(stack)-1);
         end;
       methGetPairsCount: //количество пар
-          pvarRetValue:=TJSONObject(RJSON).Count;
+        pvarRetValue:=TJSONObject(RJSON).Count;
       methGetPairName:
-          begin
-            s:=TJSONObject(RJSON).Pairs[GetNParam(paParams,0)].JsonString.Value;
-            pvarRetValue:=s;
-          end;
+        begin
+          s:=TJSONObject(RJSON).Pairs[GetNParam(paParams,0)].JsonString.Value;
+          pvarRetValue:=s;
+        end;
       methGetPairValue:
-          begin
-            s:=TJSONObject(RJSON).Pairs[GetNParam(paParams,0)].JsonValue.Value;
-            pvarRetValue:=s;
-          end;
-
+        begin
+          s:=TJSONObject(RJSON).Pairs[GetNParam(paParams,0)].JsonValue.Value;
+          pvarRetValue:=s;
+        end;
+      methParseFile:
+        begin
+          a:=GetNParam(paParams,0);
+          pvarRetValue:=ParseFile(a);
+        end;
 
       else begin
                CallAsFunc := S_FALSE;
