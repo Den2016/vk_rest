@@ -9,12 +9,14 @@ uses  { Какие библиотеки используем }
   ComServ, ComObj, ActiveX, SysUtils, Windows, AddInLib, Classes,
   IdBaseComponent, IdComponent, IdTCPConnection, IdTCPClient, IdCustomTCPServer, IdTCPServer, IdUDPBase, IdUDPClient,
   IdContext, Winapi.Messages, System.Net.URLClient, System.Net.HttpClient, System.Net.HttpClientComponent,
-  System.WideStrUtils, System.JSON;
+  System.WideStrUtils, System.JSON, System.TypInfo;
 
      const c_AddinName = 'vk_rest'; //Имя внешней компоненты
 
+     type TMethodSet = (GET,PUT,POST,DELETE,PATCH,HEAD,OPTIONS);
+
      //Количество свойств
-     const c_PropCount = 5;
+     const c_PropCount = 6;
 
      //Идентификаторы свойств
      type TProperties = (
@@ -22,7 +24,8 @@ uses  { Какие библиотеки используем }
        propFileName,
        propFileResponse,
        propStatusCode,
-       propTimeout
+       propTimeout,
+       propMethod
      );
 
      //Имена свойств, видимые из 1С
@@ -33,11 +36,12 @@ uses  { Какие библиотеки используем }
       ('FileName','Файл'),
       ('FileResponse','ФайлОтвета'),
       ('StatusCode','КодСтатуса'),
-      ('TimeOut','Таймаут')
+      ('TimeOut','Таймаут'),
+      ('Method','Метод')
     );
 
     //Количество методов
-     const c_MethCount = 15;
+     const c_MethCount = 17;
     //Идентификаторы методов.
     type TMethods = (
        methRequest,
@@ -54,7 +58,9 @@ uses  { Какие библиотеки используем }
        methGetPairsCount,
        methGetPairName,
        methGetPairValue,
-       methParseFile
+       methParseFile,
+       methClearHeaders, // очистка заголовков
+       methAddHeader // добавить заголовок - два параметра - имя и заголовок, например 'Content-type','application/json; charset=utf-8'
 
        );
 
@@ -76,7 +82,9 @@ uses  { Какие библиотеки используем }
     ('GetPairsCount','JSONКоличествоПар','КоличествоПар','0'),
     ('GetPairName','JSONИмяПары','ИмяПары','1'), // индекс пары
     ('GetPairValue','JSONЗначениеПары','ЗначениеПары','1'), //индекс пары
-    ('ParseFile','РазобратьФайл','РазобратьФайл','1') //разобрать файл с json
+    ('ParseFile','РазобратьФайл','РазобратьФайл','1'), //разобрать файл с json - имя файла
+    ('ClearHeaders','ОчиститьЗаголовки','УдалитьЗаголовки','0'), //
+    ('AddHeader','ДобавитьЗаголовок','ДобавитьЗаголовок','2') //
     );
 
 const
@@ -96,7 +104,11 @@ type
     objResponse:IHTTPResponse;
     JSON, RJSON:TJSONValue;
     stack:TArray<TJSONValue>;
+    method:String;
+    headers:TNetHeaders;
     function SendRESTRequest:TJSONObject;
+    function MakeRequest(const AURL: string; const ASource: TStream; const AResponseContent: TStream = nil): IHTTPResponse;
+
     function ParseFile(Filename:String):byte;
   public
     i1cv7: IDispatch;
@@ -204,6 +216,7 @@ end;
 function AddInObject.Init(pConnection: IDispatch): HResult; stdcall;
 //var  wnd: HWND;
 begin
+  method:='POST';
   i1cv7:=pConnection;
   NetHTTPClient:=TNetHTTPClient.Create(nil);
   NetHTTPRequest:=TNetHTTPRequest.Create(nil);
@@ -340,6 +353,7 @@ begin
             propFileResponse: pvarPropVal := objFileResponse;
             propStatusCode: pvarPropVal := objResponse.StatusCode;
             propTimeout: pvarPropVal := objTimeout;
+            propMethod: pvarPropVal := method;
             else
               GetPropVal := S_FALSE;
               Exit;
@@ -357,7 +371,7 @@ var FileStream:TFileStream;
     MemStream:TMemoryStream;
     R:IHTTPResponse;
     ResponseFilename:String;
-    headers:TNetHeaders;
+//    headers:TNetHeaders;
 begin
   Result:=nil;
   ResponseFilename:=objFileResponse;
@@ -373,12 +387,11 @@ begin
   try
     MemStream:=TMemoryStream.Create; // стрим в памяти
     FileStream:=TFileStream.Create(objFileName,fmOpenReadWrite); // открываем файл
-    SetLength(headers, 1); // задаем заголовки
-    headers[Length(headers)-1].Name:='Content-type';
-    headers[Length(headers)-1].Value:='application/json; charset=utf-8';
     try
       ConvertStreamFromAnsiToUTF8(FileStream,MemStream); // конвертируем из файла ansi в utf-8
-      R:=NetHTTPRequest.Post(objURL,MemStream,nil,headers); // делаем запрос
+//      R:=NetHTTPRequest.Post(objURL,MemStream,nil,headers); // делаем запрос
+      R:=MakeRequest(objURL,MemStream,nil); // делаем запрос
+      IF(R=nil) then Exception.Create('Ошибка при вызове метода');
       MemStream.Clear; // чистим стрим в памяти
       ConvertStreamFromUTF8ToAnsi(R.ContentStream,MemStream); // перегоняем обратно из utf8 в ansi
       FreeAndNil(FileStream); // закрываем файл,
@@ -420,6 +433,7 @@ begin
                             end;
               propFileResponse: objFileResponse:=varPropVal;
               propTimeout: objTimeout:=varPropVal;
+              propMethod: method:=varPropVal;
               else
                 SetPropVal := S_FALSE;
                 Exit;
@@ -465,6 +479,40 @@ begin
      IsPropWritable := S_OK;
 end;
 
+
+function AddInObject.MakeRequest(const AURL: string; const ASource,
+  AResponseContent: TStream): IHTTPResponse;
+var h:TNetHeaders;
+    x:Integer;
+    m:TMethodSet;
+begin
+  SetLength(h, 1); // задаем заголовки
+  h[Length(h)-1].Name:='Content-type';
+  h[Length(h)-1].Value:='application/json; charset=utf-8';
+  for x := 0 to Length(headers)-1 do begin
+    if(headers[x].Name='Content-type') then begin
+      h[0].Value:=headers[x].Value;
+    end else begin
+      SetLength(h, Length(h)+1); // задаем заголовки
+      h[Length(h)-1].Name:=headers[x].Name;
+      h[Length(h)-1].Value:=headers[x].Value;
+    end;
+  end;
+  m:=TMethodSet(GetEnumValue(TypeInfo(TMethodSet),method));
+  case m of
+    GET: result:=NetHTTPRequest.Get(AURL,AResponseContent,h);
+    PUT: result:=NetHTTPRequest.Put(AURL,ASource,AResponseContent,h);
+    POST: result:=NetHTTPRequest.Post(AURL,ASource,AResponseContent,h);
+    PATCH: result:=NetHTTPRequest.Patch(AURL,ASource,AResponseContent,h);
+    DELETE: result:=NetHTTPRequest.Delete(AURL,AResponseContent,h);
+    HEAD: result:=NetHTTPRequest.Head(AURL,h);
+    OPTIONS: result:=NetHTTPRequest.Options(AURL,AResponseContent,h);
+    else begin
+      ShowErrorLog('Неизвестный метод '+method);
+      result:=nil;
+    end;
+  end;
+end;
 
 ///////////////////////////////////////////////////////////////////////
 function AddInObject.GetNMethods(var plMethods: Integer): HResult; stdcall;
@@ -744,7 +792,16 @@ begin
           a:=GetNParam(paParams,0);
           pvarRetValue:=ParseFile(a);
         end;
-
+      methClearHeaders:
+        begin
+          SetLength(headers,0);
+        end;
+      methAddHeader:
+        begin
+          SetLength(headers,Length(headers)+1);
+          headers[Length(headers)-1].Name:=GetNParam(paParams,0);
+          headers[Length(headers)-1].Value:=GetNParam(paParams,1);
+        end;
       else begin
                CallAsFunc := S_FALSE;
                Exit;
