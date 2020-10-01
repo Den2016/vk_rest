@@ -371,9 +371,25 @@ var FileStream:TFileStream;
     MemStream:TMemoryStream;
     R:IHTTPResponse;
     ResponseFilename:String;
+    m:TMethodSet;
+    needfile:boolean;
 //    headers:TNetHeaders;
 begin
   Result:=nil;
+  FreeAndNil(JSON); // обнуляем результат предыдущего запроса, чтобы не было утечек памяти при частом использовании
+  FileStream:=nil;
+  m:=TMethodSet(GetEnumValue(TypeInfo(TMethodSet),method));
+    case m of
+      GET, DELETE, HEAD, OPTIONS: needfile:=false;
+      else begin
+        needfile:=true;
+      end;
+    end;
+  if not FileExists(objFileName) and needfile then begin
+        ShowErrorLog('Нет файла '+objFileName+' для отправки ');
+//        Exception.Create('File not found '+objFileName);
+        exit;
+  end;
   ResponseFilename:=objFileResponse;
   if ResponseFilename='' then ResponseFilename:=objFileName+'.response.json';
   NetHTTPClient.AcceptCharSet:='UTF-8, *;q=0.8';
@@ -383,18 +399,19 @@ begin
   NetHTTPClient.HandleRedirects:=True;
   NetHTTPClient.UserAgent:='vk_rest component';
   NetHTTPRequest.Client:=NetHTTPClient;
-  FreeAndNil(JSON); // обнуляем результат предыдущего запроса, чтобы не было утечек памяти при частом использовании
   try
     MemStream:=TMemoryStream.Create; // стрим в памяти
-    FileStream:=TFileStream.Create(objFileName,fmOpenReadWrite); // открываем файл
     try
+    if needfile then begin
+      FileStream:=TFileStream.Create(objFileName,fmOpenReadWrite); // открываем файл
       ConvertStreamFromAnsiToUTF8(FileStream,MemStream); // конвертируем из файла ansi в utf-8
+    end;
 //      R:=NetHTTPRequest.Post(objURL,MemStream,nil,headers); // делаем запрос
       R:=MakeRequest(objURL,MemStream,nil); // делаем запрос
       IF(R=nil) then Exception.Create('Ошибка при вызове метода');
       MemStream.Clear; // чистим стрим в памяти
       ConvertStreamFromUTF8ToAnsi(R.ContentStream,MemStream); // перегоняем обратно из utf8 в ansi
-      FreeAndNil(FileStream); // закрываем файл,
+      if FileStream <> nil then FreeAndNil(FileStream); // закрываем файл,
       try
         // parsing response
         JSON:=TJSONObject.ParseJSONValue(R.ContentAsString);
@@ -412,7 +429,7 @@ begin
       end;
     end;
   finally
-    FreeAndNil(FileStream);
+    if FileStream <> nil then FreeAndNil(FileStream);
     FreeAndNil(MemStream);
   end;
   //Result:=TJSONObject(JSON);
